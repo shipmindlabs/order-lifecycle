@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .roles import Role
 from .states import State, Trigger
 from .transitions import Transition
 
@@ -41,12 +42,16 @@ class IllegalTransition(LifecycleError):
 class RoleNotPermitted(LifecycleError):
     """The transition exists, but the acting role may not take it."""
 
-    def __init__(self, transition: Transition, role: str | None) -> None:
+    def __init__(self, transition: Transition, role: Role | str | None) -> None:
         self.transition = transition
         self.role = role
         self.required_roles = transition.roles
-        required = ", ".join(sorted(transition.roles))
-        actor = "no role was supplied" if role is None else f"role {role!r} is not one of them"
+        required = ", ".join(sorted(r.name for r in transition.roles))
+        actor = (
+            "no role was supplied"
+            if role is None
+            else f"role {str(role)!r} is not one of them"
+        )
         super().__init__(
             f"trigger {transition.trigger.name!r} in state "
             f"{transition.source.name!r} requires one of: {required}; {actor}"

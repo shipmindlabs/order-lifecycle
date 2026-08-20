@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from .errors import IllegalTransition, RoleNotPermitted
+from .roles import Role
 from .states import State, Trigger
 from .transitions import Transition, TransitionTable
 
@@ -18,12 +19,17 @@ class Machine:
     table: TransitionTable
     state: State
 
-    def allowed(self, *, role: str | None = None) -> tuple[Transition, ...]:
+    def allowed(self, *, role: Role | str | None = None) -> tuple[Transition, ...]:
         """Return the transitions ``role`` may take from the current state."""
         return self.table.available(self.state, role=role)
 
-    def resolve(self, trigger: Trigger, *, role: str | None = None) -> Transition:
-        """Return the transition ``trigger`` would take, or raise a typed error."""
+    def resolve(
+        self, trigger: Trigger, *, role: Role | str | None = None
+    ) -> Transition:
+        """Return the transition ``trigger`` would take, or raise a typed error.
+
+        The role guard is checked here, before the state moves.
+        """
         transition = self.table.find(self.state, trigger)
         if transition is None:
             raise IllegalTransition(self.state, trigger, self.allowed(role=role))
@@ -31,12 +37,12 @@ class Machine:
             raise RoleNotPermitted(transition, role)
         return transition
 
-    def can(self, trigger: Trigger, *, role: str | None = None) -> bool:
+    def can(self, trigger: Trigger, *, role: Role | str | None = None) -> bool:
         """Report whether ``trigger`` would be accepted, without raising."""
         transition = self.table.find(self.state, trigger)
         return transition is not None and transition.permits(role)
 
-    def apply(self, trigger: Trigger, *, role: str | None = None) -> Machine:
+    def apply(self, trigger: Trigger, *, role: Role | str | None = None) -> Machine:
         """Return a new machine sitting in the target state of ``trigger``."""
         transition = self.resolve(trigger, role=role)
         return replace(self, state=transition.target)

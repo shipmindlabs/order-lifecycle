@@ -1,11 +1,10 @@
-"""The transition table: the whole state machine expressed as plain data."""
+"""Edges of a lifecycle: where a trigger leads, and who may fire it."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 
+from .roles import ANYONE, Role, as_roles
 from .states import State, Trigger
 
 __all__ = ["Transition", "TransitionTable"]
@@ -13,80 +12,87 @@ __all__ = ["Transition", "TransitionTable"]
 
 @dataclass(frozen=True, slots=True)
 class Transition:
-    """A single edge: from a state, via a trigger, to another state."""
+    """One row of a lifecycle: ``source --trigger--> target``, guarded by roles."""
 
     source: State
     target: State
     trigger: Trigger
-    roles: frozenset[str] = frozenset()
-    description: str = ""
+    roles: frozenset[Role] = ANYONE
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "roles", frozenset(self.roles))
         if self.source.terminal:
             raise ValueError(
-                f"state {self.source.name!r} is terminal and cannot have outgoing transitions"
+                f"state {self.source.name!r} is terminal; no transition may leave it"
             )
+        object.__setattr__(self, "roles", as_roles(self.roles))
 
-    def permits(self, role: str | None) -> bool:
-        # An empty role set means the transition is open to every caller.
+    @property
+    def guarded(self) -> bool:
+        """Report whether only named actors may fire this transition."""
+        return bool(self.roles)
+
+    def permits(self, role: Role | str | None) -> bool:
+        """Report whether ``role`` may fire this transition."""
         if not self.roles:
             return True
-        return role is not None and role in self.roles
+        if role is None:
+            return False
+        name = role.name if isinstance(role, Role) else str(role).strip()
+        return any(allowed.name == name for allowed in self.roles)
 
     def __str__(self) -> str:
-        return f"{self.source.name} --{self.trigger.name}--> {self.target.name}"
+        edge = f"{self.source.name} --{self.trigger.name}--> {self.target.name}"
+        if not self.roles:
+            return edge
+        return f"{edge} [{', '.join(sorted(r.name for r in self.roles))}]"
 
 
 @dataclass(frozen=True, slots=True)
 class TransitionTable:
-    """An immutable collection of transitions, indexed by state and trigger."""
+    """Every transition of a lifecycle, indexed by source state and trigger."""
 
-    transitions: tuple[Transition, ...]
-    _index: Mapping[tuple[str, str], Transition] = field(
-        init=False, repr=False, compare=False
+    transitions: tuple[Transition, ...] = ()
+    _index: dict[tuple[State, Trigger], Transition] = field(
+        init=False, repr=False, compare=False, default_factory=dict
     )
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "transitions", tuple(self.transitions))
-        index: dict[tuple[str, str], Transition] = {}
-        for transition in self.transitions:
-            key = (transition.source.name, transition.trigger.name)
+        rows = tuple(self.transitions)
+        index: dict[tuple[State, Trigger], Transition] = {}
+        for row in rows:
+            key = (row.source, row.trigger)
             if key in index:
                 raise ValueError(
-                    f"duplicate transition from {key[0]!r} on trigger {key[1]!r}"
+                    f"duplicate transition for state {row.source.name!r} "
+                    f"and trigger {row.trigger.name!r}"
                 )
-            index[key] = transition
-        object.__setattr__(self, "_index", MappingProxyType(index))
+            index[key] = row
+        object.__setattr__(self, "transitions", rows)
+        object.__setattr__(self, "_index", index)
 
-    def find(self, source: State, trigger: Trigger) -> Transition | None:
-        """Return the transition leaving ``source`` on ``trigger``, if declared."""
-        return self._index.get((source.name, trigger.name))
+    def find(self, state: State, trigger: Trigger) -> Transition | None:
+        """Return the transition leaving ``state`` on ``trigger``, if any."""
+        return self._index.get((state, trigger))
 
     def available(
-        self, source: State, *, role: str | None = None
+        self, state: State, *, role: Role | str | None = None
     ) -> tuple[Transition, ...]:
-        """Return the transitions leaving ``source`` that ``role`` may take."""
-        return tuple(
-            transition
-            for transition in self.transitions
-            if transition.source.name == source.name and transition.permits(role)
-        )
+        """Return the transitions leaving ``state``, filtered by ``role`` if given."""
+        rows = tuple(row for row in self.transitions if row.source == state)
+        if role is None:
+            return rows
+        return tuple(row for row in rows if row.permits(role))
 
     @property
-    def states(self) -> frozenset[State]:
-        """Every state mentioned by the table, as source or as target."""
-        return frozenset(
-            state
-            for transition in self.transitions
-            for state in (transition.source, transition.target)
-        )
+    def roles(self) -> frozenset[Role]:
+        """Return every role this table guards a transition with."""
+        return frozenset(role for row in self.transitions for role in row.roles)
 
-    @property
-    def triggers(self) -> frozenset[Trigger]:
-        return frozenset(transition.trigger for transition in self.transitions)
+    def for_role(self, role: Role | str) -> tuple[Transition, ...]:
+        """Return every transition ``role`` may fire, guarded or open."""
+        return tuple(row for row in self.transitions if row.permits(role))
 
-    def __iter__(self) -> Iterator[Transition]:
+    def __iter__(self):
         return iter(self.transitions)
 
     def __len__(self) -> int:
