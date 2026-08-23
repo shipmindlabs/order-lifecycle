@@ -5,8 +5,9 @@ cancellation paths and a readable history.
 
 ## Status
 
-Early development. States, transitions and role guards can be declared as data
-and applied through the machine; hooks and history are not implemented yet.
+Early development. States, transitions, role guards and guard conditions can be
+declared as data and applied through the machine; hooks and history are not
+implemented yet.
 
 ## Installation
 
@@ -99,37 +100,121 @@ TABLE.roles               # -> frozenset({Role('customer'), Role('warehouse'), .
 TABLE.for_role(SUPPORT)   # -> every transition support may fire, guarded or open
 ```
 
+## Guard conditions
+
+Being the right actor is not always enough: the warehouse may ship, but only
+once the payment is confirmed and the goods are in stock. A `Condition` is a
+named predicate over the order, and it carries the sentence it will use when it
+refuses:
+
+```python
+from order_lifecycle import Condition, flag
+
+PAYMENT_CONFIRMED = flag(
+    "payment_confirmed",
+    name="payment confirmed",
+    requires="the payment must be confirmed",
+)
+IN_STOCK = Condition(
+    "in stock",
+    lambda order: order["units_available"] > 0,
+    "every line item must be in stock",
+)
+
+TABLE = TransitionTable(
+    (
+        Transition(NEW, PAID, PAY, roles=CUSTOMER),
+        Transition(
+            PAID,
+            SHIPPED,
+            SHIP,
+            roles=WAREHOUSE,
+            conditions=(PAYMENT_CONFIRMED, IN_STOCK),
+        ),
+        Transition(SHIPPED, DELIVERED, DELIVER, roles=COURIER),
+        Transition(NEW, CANCELLED, CANCEL),
+        Transition(PAID, CANCELLED, CANCEL, roles={CUSTOMER, SUPPORT}),
+    )
+)
+
+str(TABLE.find(PAID, SHIP))
+# 'paid --ship--> shipped [warehouse] {payment confirmed, in stock}'
+```
+
+The order itself is the context. It can be any object; `flag()` reads a mapping
+key or an attribute of the same name, while a hand-written `Condition` receives
+the context and decides for itself.
+
+A failed condition explains itself instead of returning a bare `False`:
+
+```python
+ship = TABLE.find(PAID, SHIP)
+
+ship.holds({"payment_confirmed": True, "units_available": 3})   # -> True
+[str(result) for result in ship.unmet({"payment_confirmed": False, "units_available": 0})]
+# -> ['payment confirmed: the payment must be confirmed',
+#     'in stock: every line item must be in stock']
+```
+
+Conditions sit on top of roles rather than replacing them; `allows()` asks both
+questions at once:
+
+```python
+ready = {"payment_confirmed": True, "units_available": 3}
+
+ship.allows(WAREHOUSE, ready)   # -> True
+ship.allows(CUSTOMER, ready)    # -> False, wrong actor
+ship.allows(WAREHOUSE, {"payment_confirmed": False, "units_available": 3})
+# -> False, right actor, wrong moment
+```
+
 ## Running a lifecycle
 
 `Machine` pairs a table with the state an order sits in. Applying a trigger
 returns a new machine; the table stays the single source of truth:
 
 ```python
-from order_lifecycle import IllegalTransition, Machine, RoleNotPermitted
+from order_lifecycle import ConditionNotMet, IllegalTransition, Machine, RoleNotPermitted
 
-order = Machine(TABLE, NEW)
-order = order.apply(PAY, role=CUSTOMER)   # -> Machine(state=paid)
-order.can(SHIP, role=WAREHOUSE)           # -> True
-order.allowed(role=SUPPORT)               # -> (paid --cancel--> cancelled [customer, support],)
+order = {"payment_confirmed": True, "units_available": 3}
+
+machine = Machine(TABLE, NEW)
+machine = machine.apply(PAY, role=CUSTOMER)        # -> Machine(state=paid)
+machine.can(SHIP, role=WAREHOUSE, context=order)   # -> True
+machine.allowed(role=SUPPORT)                      # -> (paid --cancel--> cancelled [customer, support],)
 ```
 
 A refused trigger raises a typed error that names the current state and what
 would have been accepted instead:
 
 ```python
-order.apply(PAY, role=CUSTOMER)
+machine.apply(PAY, role=CUSTOMER)
 # IllegalTransition: cannot apply trigger 'pay' in state 'paid':
-#                    allowed here: cancel
+#                    allowed here: cancel, ship
 
-order.apply(SHIP, role=CUSTOMER)
+machine.apply(SHIP, role=CUSTOMER)
 # RoleNotPermitted: trigger 'ship' in state 'paid' requires one of: warehouse;
 #                   role 'customer' is not one of them
+
+machine.apply(SHIP, role=WAREHOUSE, context={"payment_confirmed": False, "units_available": 3})
+# ConditionNotMet: trigger 'ship' in state 'paid' requires:
+#                  the payment must be confirmed
 ```
 
-The guard is checked in `resolve()`, before the machine moves — a wrong actor
-never reaches a side effect. Both errors derive from `LifecycleError` and carry
-the offending state, trigger, roles and allowed transitions as attributes, so
-callers can render their own message.
+Both guards are checked in `resolve()`, before the machine moves — the role
+first, then the conditions — so a wrong actor or an unready order never reaches
+a side effect. A conditional transition applied without a context is refused the
+same way a guarded one refuses a missing role. Every error derives from
+`LifecycleError` and carries the offending state, trigger, roles and unmet
+conditions as attributes, so callers can render their own message:
+
+```python
+try:
+    machine.apply(SHIP, role=WAREHOUSE, context={"payment_confirmed": False, "units_available": 0})
+except ConditionNotMet as error:
+    [result.detail for result in error.failures]
+    # -> ['the payment must be confirmed', 'every line item must be in stock']
+```
 
 ## Development
 

@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from typing import Iterable
+
+from .conditions import Condition, ConditionResult
 from .roles import Role
 from .states import State, Trigger
 from .transitions import Transition
 
-__all__ = ["LifecycleError", "IllegalTransition", "RoleNotPermitted"]
+__all__ = [
+    "LifecycleError",
+    "IllegalTransition",
+    "RoleNotPermitted",
+    "ConditionNotMet",
+]
 
 
 class LifecycleError(Exception):
@@ -56,3 +64,26 @@ class RoleNotPermitted(LifecycleError):
             f"trigger {transition.trigger.name!r} in state "
             f"{transition.source.name!r} requires one of: {required}; {actor}"
         )
+
+
+class ConditionNotMet(LifecycleError):
+    """The role may take the transition, but the order is not ready for it."""
+
+    def __init__(
+        self, transition: Transition, failures: Iterable[ConditionResult]
+    ) -> None:
+        self.transition = transition
+        self.failures = tuple(failures)
+        reasons = "; ".join(
+            failure.detail or f"{failure.condition.name} does not hold"
+            for failure in self.failures
+        )
+        super().__init__(
+            f"trigger {transition.trigger.name!r} in state "
+            f"{transition.source.name!r} requires: {reasons}"
+        )
+
+    @property
+    def unmet(self) -> tuple[Condition, ...]:
+        """Return the conditions that refused, in declaration order."""
+        return tuple(failure.condition for failure in self.failures)

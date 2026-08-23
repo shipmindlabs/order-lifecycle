@@ -1,6 +1,12 @@
 """Declarative state machine for order lifecycles."""
 
-from .errors import IllegalTransition, LifecycleError, RoleNotPermitted
+from .conditions import ALWAYS, Condition, ConditionResult, flag
+from .errors import (
+    ConditionNotMet,
+    IllegalTransition,
+    LifecycleError,
+    RoleNotPermitted,
+)
 from .machine import Machine
 from .roles import ANYONE, COURIER, CUSTOMER, SUPPORT, WAREHOUSE, Role
 from .states import State, Trigger
@@ -15,12 +21,17 @@ __all__ = [
     "WAREHOUSE",
     "COURIER",
     "SUPPORT",
+    "Condition",
+    "ConditionResult",
+    "ALWAYS",
+    "flag",
     "Transition",
     "TransitionTable",
     "Machine",
     "LifecycleError",
     "IllegalTransition",
     "RoleNotPermitted",
+    "ConditionNotMet",
     "__version__",
 ]
 
