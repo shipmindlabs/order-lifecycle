@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .errors import ConditionNotMet, IllegalTransition, RoleNotPermitted
+from .errors import ConditionNotMet, HookFailed, IllegalTransition, RoleNotPermitted
+from .hooks import Hook, TransitionContext
 from .roles import Role
 from .states import State, Trigger
 from .transitions import Transition, TransitionTable
@@ -66,9 +67,34 @@ class Machine:
         role: Role | str | None = None,
         context: Any = None,
     ) -> Machine:
-        """Return a new machine sitting in the target state of ``trigger``."""
+        """Return a new machine sitting in the target state of ``trigger``.
+
+        The before hooks run once both guards have passed, the after hooks once
+        the target state is settled. A hook that raises aborts the move: the
+        new machine is never handed back, so the caller keeps the source state.
+        """
         transition = self.resolve(trigger, role=role, context=context)
-        return replace(self, state=transition.target)
+        self._fire(transition.before, "before", transition, role, context)
+        moved = replace(self, state=transition.target)
+        self._fire(transition.after, "after", transition, role, context)
+        return moved
+
+    def _fire(
+        self,
+        hooks: tuple[Hook, ...],
+        phase: str,
+        transition: Transition,
+        role: Role | str | None,
+        subject: Any,
+    ) -> None:
+        done: list[Hook] = []
+        for hook in hooks:
+            moving = TransitionContext(transition, phase, role, subject)
+            try:
+                hook(moving)
+            except Exception as error:
+                raise HookFailed(hook, moving, error, tuple(done)) from error
+            done.append(hook)
 
     def __str__(self) -> str:
         return f"Machine(state={self.state.name})"

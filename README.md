@@ -5,8 +5,8 @@ cancellation paths and a readable history.
 
 ## Status
 
-Early development. States, transitions, role guards and guard conditions can be
-declared as data and applied through the machine; hooks and history are not
+Early development. States, transitions, role guards, guard conditions and hooks
+can be declared as data and applied through the machine; history is not
 implemented yet.
 
 ## Installation
@@ -167,6 +167,70 @@ ship.allows(CUSTOMER, ready)    # -> False, wrong actor
 ship.allows(WAREHOUSE, {"payment_confirmed": False, "units_available": 3})
 # -> False, right actor, wrong moment
 ```
+
+## Hooks
+
+Something usually has to happen when an order moves: stock is reserved, a label
+is printed, a customer is told. A `Hook` hangs that work on the transition
+itself instead of on every call site that fires it:
+
+```python
+from order_lifecycle import Hook
+
+def reserve_stock(move):
+    warehouse.reserve(move.subject, units=1)
+
+NOTIFY = Hook("notify customer", lambda move: mailer.send(move.subject, move.trigger.name))
+
+Transition(
+    PAID,
+    SHIPPED,
+    SHIP,
+    roles=WAREHOUSE,
+    conditions=(PAYMENT_CONFIRMED, IN_STOCK),
+    before=reserve_stock,
+    after=NOTIFY,
+)
+```
+
+A bare callable is wrapped into a `Hook` named after the function; several run
+in declaration order (`before=(reserve_stock, print_label)`). Each one is called
+with a `TransitionContext` describing the move — the transition, the phase, the
+acting role and the order that was passed as `context`:
+
+```python
+def audit(move):
+    move.phase       # -> 'before' or 'after'
+    move.source      # -> paid
+    move.target      # -> shipped
+    move.trigger     # -> ship
+    move.role        # -> customer, warehouse, ... or None
+    move.subject     # -> the order handed to apply(context=...)
+```
+
+`apply()` runs the before hooks once both guards have passed and the after hooks
+once the target state is settled. A hook that raises is wrapped in `HookFailed`,
+and `apply()` never returns — the machine the caller holds is still the one in
+the source state, so a failing hook cannot leave an order half-moved:
+
+```python
+from order_lifecycle import HookFailed
+
+machine = Machine(TABLE, PAID)
+try:
+    machine = machine.apply(SHIP, role=WAREHOUSE, context=order)
+except HookFailed as error:
+    error.phase        # -> 'before'
+    error.hook.name    # -> 'reserve stock'
+    error.cause        # -> the exception the hook raised
+    error.completed    # -> the hooks of this phase that already ran
+
+machine.state          # -> paid, untouched
+```
+
+Side effects an earlier hook already performed are the caller's to undo; the
+error names them in `completed` so a compensating step knows exactly how far the
+move got.
 
 ## Running a lifecycle
 

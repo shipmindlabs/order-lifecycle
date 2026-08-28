@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from .conditions import Condition, ConditionResult
+from .hooks import Hook, TransitionContext
 from .roles import Role
 from .states import State, Trigger
 from .transitions import Transition
@@ -14,6 +15,7 @@ __all__ = [
     "IllegalTransition",
     "RoleNotPermitted",
     "ConditionNotMet",
+    "HookFailed",
 ]
 
 
@@ -87,3 +89,28 @@ class ConditionNotMet(LifecycleError):
     def unmet(self) -> tuple[Condition, ...]:
         """Return the conditions that refused, in declaration order."""
         return tuple(failure.condition for failure in self.failures)
+
+
+class HookFailed(LifecycleError):
+    """A callback around the transition raised, so the move was abandoned."""
+
+    def __init__(
+        self,
+        hook: Hook,
+        context: TransitionContext,
+        cause: BaseException,
+        completed: Iterable[Hook] = (),
+    ) -> None:
+        self.hook = hook
+        self.context = context
+        self.cause = cause
+        self.completed = tuple(completed)
+        self.phase = context.phase
+        self.transition = context.transition
+        transition = context.transition
+        super().__init__(
+            f"{context.phase} hook {hook.name!r} failed for trigger "
+            f"{transition.trigger.name!r} in state {transition.source.name!r}: "
+            f"{type(cause).__name__}: {cause}; the order stays in "
+            f"{transition.source.name!r}"
+        )

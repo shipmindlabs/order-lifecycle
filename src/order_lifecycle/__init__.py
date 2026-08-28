@@ -3,10 +3,12 @@
 from .conditions import ALWAYS, Condition, ConditionResult, flag
 from .errors import (
     ConditionNotMet,
+    HookFailed,
     IllegalTransition,
     LifecycleError,
     RoleNotPermitted,
 )
+from .hooks import NO_HOOKS, Hook, TransitionContext
 from .machine import Machine
 from .roles import ANYONE, COURIER, CUSTOMER, SUPPORT, WAREHOUSE, Role
 from .states import State, Trigger
@@ -25,6 +27,9 @@ __all__ = [
     "ConditionResult",
     "ALWAYS",
     "flag",
+    "Hook",
+    "TransitionContext",
+    "NO_HOOKS",
     "Transition",
     "TransitionTable",
     "Machine",
@@ -32,6 +37,7 @@ __all__ = [
     "IllegalTransition",
     "RoleNotPermitted",
     "ConditionNotMet",
+    "HookFailed",
     "__version__",
 ]
 

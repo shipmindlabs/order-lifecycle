@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .conditions import ALWAYS, Condition, ConditionResult, as_conditions, evaluate
+from .hooks import NO_HOOKS, Hook, as_hooks
 from .roles import ANYONE, Role, as_roles
 from .states import State, Trigger
 
@@ -21,6 +22,8 @@ class Transition:
     trigger: Trigger
     roles: frozenset[Role] = ANYONE
     conditions: tuple[Condition, ...] = ALWAYS
+    before: tuple[Hook, ...] = NO_HOOKS
+    after: tuple[Hook, ...] = NO_HOOKS
 
     def __post_init__(self) -> None:
         if self.source.terminal:
@@ -29,6 +32,8 @@ class Transition:
             )
         object.__setattr__(self, "roles", as_roles(self.roles))
         object.__setattr__(self, "conditions", as_conditions(self.conditions))
+        object.__setattr__(self, "before", as_hooks(self.before))
+        object.__setattr__(self, "after", as_hooks(self.after))
 
     @property
     def guarded(self) -> bool:
@@ -39,6 +44,16 @@ class Transition:
     def conditional(self) -> bool:
         """Report whether predicates must hold before this transition fires."""
         return bool(self.conditions)
+
+    @property
+    def hooked(self) -> bool:
+        """Report whether any callback runs around this transition."""
+        return bool(self.before or self.after)
+
+    @property
+    def hooks(self) -> tuple[Hook, ...]:
+        """Return every hook of this transition, before ones first."""
+        return self.before + self.after
 
     def permits(self, role: Role | str | None) -> bool:
         """Report whether ``role`` may fire this transition."""
