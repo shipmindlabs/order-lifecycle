@@ -8,6 +8,7 @@ from .errors import (
     LifecycleError,
     RoleNotPermitted,
 )
+from .history import EMPTY_HISTORY, Entry, History
 from .hooks import NO_HOOKS, Hook, TransitionContext
 from .machine import Machine
 from .roles import ANYONE, COURIER, CUSTOMER, SUPPORT, WAREHOUSE, Role
@@ -30,6 +31,9 @@ __all__ = [
     "Hook",
     "TransitionContext",
     "NO_HOOKS",
+    "Entry",
+    "History",
+    "EMPTY_HISTORY",
     "Transition",
     "TransitionTable",
     "Machine",

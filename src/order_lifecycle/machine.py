@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
 
 from .errors import ConditionNotMet, HookFailed, IllegalTransition, RoleNotPermitted
+from .history import EMPTY_HISTORY, History
 from .hooks import Hook, TransitionContext
 from .roles import Role
 from .states import State, Trigger
@@ -20,6 +22,7 @@ class Machine:
 
     table: TransitionTable
     state: State
+    history: History = EMPTY_HISTORY
 
     def allowed(
         self, *, role: Role | str | None = None, context: Any = None
@@ -66,16 +69,23 @@ class Machine:
         *,
         role: Role | str | None = None,
         context: Any = None,
+        reason: str = "",
+        at: datetime | None = None,
     ) -> Machine:
         """Return a new machine sitting in the target state of ``trigger``.
 
         The before hooks run once both guards have passed, the after hooks once
         the target state is settled. A hook that raises aborts the move: the
-        new machine is never handed back, so the caller keeps the source state.
+        new machine is never handed back, so the caller keeps the source state
+        and a history without the abandoned move.
         """
         transition = self.resolve(trigger, role=role, context=context)
         self._fire(transition.before, "before", transition, role, context)
-        moved = replace(self, state=transition.target)
+        moved = replace(
+            self,
+            state=transition.target,
+            history=self.history.log(transition, role=role, reason=reason, at=at),
+        )
         self._fire(transition.after, "after", transition, role, context)
         return moved
 
@@ -95,6 +105,10 @@ class Machine:
             except Exception as error:
                 raise HookFailed(hook, moving, error, tuple(done)) from error
             done.append(hook)
+
+    def timeline(self) -> str:
+        """Render the moves this order has made, one readable line each."""
+        return self.history.timeline()
 
     def __str__(self) -> str:
         return f"Machine(state={self.state.name})"

@@ -6,8 +6,8 @@ cancellation paths and a readable history.
 ## Status
 
 Early development. States, transitions, role guards, guard conditions and hooks
-can be declared as data and applied through the machine; history is not
-implemented yet.
+can be declared as data and applied through the machine, which keeps an
+append-only history of every accepted move.
 
 ## Installation
 
@@ -278,6 +278,63 @@ try:
 except ConditionNotMet as error:
     [result.detail for result in error.failures]
     # -> ['the payment must be confirmed', 'every line item must be in stock']
+```
+
+## History
+
+A support agent asking "why is this order cancelled?" should not have to read
+application logs. Every accepted move is appended to the machine's history, so
+what changed, when and by whom travels with the order:
+
+```python
+machine = Machine(TABLE, NEW)
+machine = machine.apply(PAY, role=CUSTOMER)
+machine = machine.apply(CANCEL, role=SUPPORT, reason="duplicate order")
+
+print(machine.timeline())
+# 2026-05-04T09:12:31+00:00 new --pay--> paid by customer
+# 2026-05-04T09:14:02+00:00 paid --cancel--> cancelled by support: duplicate order
+```
+
+The history is append-only: `apply()` returns a new machine whose history is the
+old one plus a single `Entry`. Nothing rewrites or drops a past move, and a
+refused trigger or a failing hook records nothing at all, because the machine
+carrying the new entry is never handed back.
+
+An entry is data, not a formatted string, so a timeline can be rendered however
+the caller likes:
+
+```python
+last = machine.history.last
+last.source        # -> paid
+last.target        # -> cancelled
+last.trigger       # -> cancel
+last.role          # -> Role('support'), or None when the transition is open
+last.actor         # -> 'support', or 'anyone'
+last.reason        # -> 'duplicate order'
+last.at            # -> a timezone-aware datetime, UTC
+```
+
+The record answers the questions an order timeline is usually asked:
+
+```python
+len(machine.history)                # -> 2
+machine.history.states              # -> (new, paid, cancelled)
+machine.history.roles               # -> frozenset({Role('customer'), Role('support')})
+machine.history.by_role(SUPPORT)    # -> every move support made
+machine.history.for_trigger(CANCEL) # -> every cancellation
+machine.history.since(this_morning) # -> the moves recorded since a moment
+```
+
+The timestamp defaults to the moment of the move; pass `at=` to `apply()` when
+the caller owns the clock, for backfills or reproducible tests. A machine can
+also be built with a history it already has, which is how an order is rehydrated
+from storage:
+
+```python
+from order_lifecycle import Entry, History
+
+machine = Machine(TABLE, PAID, History((Entry(NEW, PAID, PAY, CUSTOMER),)))
 ```
 
 ## Development
