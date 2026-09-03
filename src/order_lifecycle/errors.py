@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 from .conditions import Condition, ConditionResult
 from .hooks import Hook, TransitionContext
@@ -10,12 +10,17 @@ from .roles import Role
 from .states import State, Trigger
 from .transitions import Transition
 
+if TYPE_CHECKING:  # pragma: no cover - imported for typing only
+    from .cancellation import CancellationPath, CancellationReason
+
 __all__ = [
     "LifecycleError",
     "IllegalTransition",
     "RoleNotPermitted",
     "ConditionNotMet",
     "HookFailed",
+    "CannotCancel",
+    "ReasonNotAccepted",
 ]
 
 
@@ -113,4 +118,49 @@ class HookFailed(LifecycleError):
             f"{transition.trigger.name!r} in state {transition.source.name!r}: "
             f"{type(cause).__name__}: {cause}; the order stays in "
             f"{transition.source.name!r}"
+        )
+
+
+class CannotCancel(LifecycleError):
+    """No cancellation path leaves the current state for this actor."""
+
+    def __init__(
+        self,
+        state: State,
+        role: Role | str | None = None,
+        actors: Iterable[Role] = (),
+    ) -> None:
+        self.state = state
+        self.role = role
+        self.actors = frozenset(actors)
+        who = f"role {str(role)!r}" if role is not None else "a caller without a role"
+        if self.actors:
+            names = ", ".join(sorted(r.name for r in self.actors))
+            offer = f"here only {names} may cancel"
+        else:
+            offer = f"no cancellation path leaves {state.name!r}"
+        super().__init__(f"{who} cannot cancel an order in state {state.name!r}: {offer}")
+
+
+class ReasonNotAccepted(LifecycleError):
+    """The path offers a closed list of reasons, and this is not one of them."""
+
+    def __init__(
+        self,
+        path: "CancellationPath",
+        reason: "CancellationReason | str | None",
+        accepted: Iterable["CancellationReason"] = (),
+    ) -> None:
+        self.path = path
+        self.reason = reason
+        self.accepted = tuple(accepted)
+        codes = ", ".join(item.code for item in self.accepted)
+        given = (
+            "no reason was given"
+            if reason is None
+            else f"reason {str(getattr(reason, 'code', reason))!r} is not one of them"
+        )
+        super().__init__(
+            f"cancelling {path.source.name!r} with trigger {path.trigger.name!r} "
+            f"requires one of: {codes}; {given}"
         )

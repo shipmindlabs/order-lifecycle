@@ -1,11 +1,25 @@
 """Declarative state machine for order lifecycles."""
 
+from .cancellation import (
+    CHANGED_MIND,
+    DAMAGED,
+    DUPLICATE,
+    NO_REASONS,
+    OUT_OF_STOCK,
+    PAYMENT_FAILED,
+    UNDELIVERABLE,
+    CancellationPath,
+    CancellationPolicy,
+    CancellationReason,
+)
 from .conditions import ALWAYS, Condition, ConditionResult, flag
 from .errors import (
+    CannotCancel,
     ConditionNotMet,
     HookFailed,
     IllegalTransition,
     LifecycleError,
+    ReasonNotAccepted,
     RoleNotPermitted,
 )
 from .history import EMPTY_HISTORY, Entry, History
@@ -37,11 +51,23 @@ __all__ = [
     "Transition",
     "TransitionTable",
     "Machine",
+    "CancellationReason",
+    "CancellationPath",
+    "CancellationPolicy",
+    "NO_REASONS",
+    "CHANGED_MIND",
+    "DUPLICATE",
+    "PAYMENT_FAILED",
+    "OUT_OF_STOCK",
+    "DAMAGED",
+    "UNDELIVERABLE",
     "LifecycleError",
     "IllegalTransition",
     "RoleNotPermitted",
     "ConditionNotMet",
     "HookFailed",
+    "CannotCancel",
+    "ReasonNotAccepted",
     "__version__",
 ]
 
