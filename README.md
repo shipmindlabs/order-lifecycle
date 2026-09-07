@@ -5,9 +5,9 @@ cancellation paths and a readable history.
 
 ## Status
 
-Early development. States, transitions, role guards, guard conditions and hooks
-can be declared as data and applied through the machine, which keeps an
-append-only history of every accepted move.
+Early development. States, transitions, role guards, guard conditions, hooks and
+cancellation paths can be declared as data and applied through the machine,
+which keeps an append-only history of every accepted move.
 
 ## Installation
 
@@ -279,6 +279,119 @@ except ConditionNotMet as error:
     [result.detail for result in error.failures]
     # -> ['the payment must be confirmed', 'every line item must be in stock']
 ```
+
+## Cancellation paths
+
+Cancel is not one transition. A customer changes their mind, the warehouse
+rejects an order it cannot pack, the courier fails to hand a parcel over and the
+goods travel back. Different states, different actors, different reasons and
+different follow-ups. A `CancellationPath` declares one of those ways out, and a
+`CancellationPolicy` collects them:
+
+```python
+from order_lifecycle import (
+    CHANGED_MIND,
+    DAMAGED,
+    DUPLICATE,
+    OUT_OF_STOCK,
+    UNDELIVERABLE,
+    CancellationPath,
+    CancellationPolicy,
+)
+
+RETURNED = State("returned")
+REJECT = Trigger("reject")
+FAIL = Trigger("fail")
+WRITE_OFF = Trigger("write off")
+
+def refund(move): payments.refund(move.subject)
+def restock(move): warehouse.release(move.subject)
+def collect_parcel(move): courier.schedule_pickup(move.subject)
+
+POLICY = CancellationPolicy(
+    (
+        CancellationPath(
+            NEW, CANCELLED, CANCEL,
+            roles={CUSTOMER, SUPPORT},
+            reasons=(CHANGED_MIND, DUPLICATE),
+        ),
+        CancellationPath(
+            PAID, CANCELLED, CANCEL,
+            roles={CUSTOMER, SUPPORT},
+            reasons=(CHANGED_MIND, DUPLICATE),
+            follow_up=refund,
+        ),
+        CancellationPath(
+            PAID, CANCELLED, REJECT,
+            roles=WAREHOUSE,
+            reasons=(OUT_OF_STOCK, DAMAGED),
+            follow_up=(refund, restock),
+        ),
+        CancellationPath(
+            SHIPPED, RETURNED, FAIL,
+            roles=COURIER,
+            reasons=(UNDELIVERABLE, DAMAGED),
+            follow_up=collect_parcel,
+        ),
+        CancellationPath(RETURNED, CANCELLED, WRITE_OFF, roles=WAREHOUSE),
+    )
+)
+
+TABLE = POLICY.extend(CORE)
+```
+
+A path is an ordinary transition wearing a policy hat: `extend()` appends every
+path to a table as a normal row, `follow_up=` becomes the after phase of that
+row, and each actor leaving a shared state gets its own trigger — the customer
+`cancel`s a paid order, the warehouse `reject`s it. Not every path ends in
+`cancelled`: a failed delivery moves to `returned`, which the warehouse later
+writes off.
+
+Because the policy is data, the offer a UI has to render can be read off it
+instead of being hard-coded per screen:
+
+```python
+POLICY.actors(PAID)                       # -> frozenset({customer, support, warehouse})
+POLICY.reasons_for(PAID, role=CUSTOMER)   # -> (changed_mind, duplicate)
+POLICY.reasons_for(PAID, role=WAREHOUSE)  # -> (out_of_stock, damaged)
+
+str(POLICY.available(SHIPPED, role=COURIER)[0])
+# 'shipped --fail--> returned [courier] (undeliverable, damaged) -> collect parcel'
+```
+
+`cancel()` picks the path the actor may take, checks the reason against the ones
+that path offers, and then moves through the machine, so role guards, conditions,
+hooks and history behave exactly as they do for any other trigger:
+
+```python
+machine = POLICY.cancel(Machine(TABLE, PAID), role=WAREHOUSE, reason=OUT_OF_STOCK)
+
+machine.state                 # -> cancelled
+machine.history.last.trigger  # -> reject
+machine.history.last.reason   # -> 'the goods are not in the warehouse'
+```
+
+A path that declares reasons takes only those and demands one; a path that
+declares none — writing off a returned order — records whatever sentence the
+caller wrote. `CHANGED_MIND`, `DUPLICATE`, `PAYMENT_FAILED`, `OUT_OF_STOCK`,
+`DAMAGED` and `UNDELIVERABLE` ship as constants, and any other is a
+`CancellationReason("code", "detail")` away.
+
+Both refusals are typed and say who could have cancelled, and with what:
+
+```python
+POLICY.cancel(Machine(TABLE, PAID), role=COURIER, reason=UNDELIVERABLE)
+# CannotCancel: role 'courier' cannot cancel an order in state 'paid':
+#               here only customer, support, warehouse may cancel
+
+POLICY.cancel(Machine(TABLE, PAID), role=CUSTOMER, reason=OUT_OF_STOCK)
+# ReasonNotAccepted: cancelling 'paid' with trigger 'cancel' requires one of:
+#                    changed_mind, duplicate;
+#                    reason 'out_of_stock' is not one of them
+```
+
+When an actor has several ways out of a state, the first declared one wins; pass
+`trigger=` to name another.
 
 ## History
 
