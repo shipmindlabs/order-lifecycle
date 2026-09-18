@@ -15,6 +15,57 @@ which keeps an append-only history of every accepted move.
 pip install order-lifecycle
 ```
 
+## Why a table instead of scattered ifs
+
+The rules of an order lifecycle are easy to state and hard to keep. They usually
+end up spread across the handlers that move an order:
+
+```python
+def ship(order, user):
+    if order.status != "paid":
+        raise ValueError(f"cannot ship an order in {order.status}")
+    if user.role != "warehouse":
+        raise PermissionError("only the warehouse may ship")
+    if not order.payment_confirmed:
+        raise ValueError("payment is not confirmed")
+    order.status = "shipped"
+    reserve_stock(order)
+    mailer.send(order, "shipped")
+    log.info("order %s shipped by %s", order.id, user.id)
+```
+
+One handler per trigger, each re-deriving the same facts. Three things go wrong,
+usually in this order:
+
+- **The rules are duplicated.** The admin panel, the mobile API and the nightly
+  job grow their own copy of the same `if`, and the copies drift.
+- **Nothing can be asked.** "What may support do with this order right now?" has
+  no answer except reading every handler, so the UI hard-codes a second, parallel
+  guess of the same matrix.
+- **The reason is lost.** The status changed; why it changed lives in a log line
+  that is rotated away before anyone asks.
+
+The same lifecycle as data is a list of rows, and each of those questions becomes
+a lookup:
+
+```python
+Transition(
+    PAID,
+    SHIPPED,
+    SHIP,
+    roles=WAREHOUSE,
+    conditions=(PAYMENT_CONFIRMED, IN_STOCK),
+    before=reserve_stock,
+    after=notify_customer,
+)
+```
+
+The handler shrinks to `machine.apply(SHIP, role=user.role, context=order)`, the
+UI reads its buttons off `machine.allowed(role=...)`, a refusal arrives as a
+typed error naming what was required, and the accepted move is appended to a
+history that travels with the order. Adding a state means editing one table
+instead of auditing every caller.
+
 ## Declaring a lifecycle
 
 A lifecycle is a table of `(from-state, trigger, to-state)` rows, not a pile of
@@ -340,12 +391,13 @@ POLICY = CancellationPolicy(
 TABLE = POLICY.extend(CORE)
 ```
 
-A path is an ordinary transition wearing a policy hat: `extend()` appends every
-path to a table as a normal row, `follow_up=` becomes the after phase of that
-row, and each actor leaving a shared state gets its own trigger — the customer
-`cancel`s a paid order, the warehouse `reject`s it. Not every path ends in
-`cancelled`: a failed delivery moves to `returned`, which the warehouse later
-writes off.
+`CORE` here is a table holding the forward rows — pay, ship, deliver — and
+nothing else. A path is an ordinary transition wearing a policy hat: `extend()`
+appends every path to a table as a normal row, `follow_up=` becomes the after
+phase of that row, and each actor leaving a shared state gets its own trigger —
+the customer `cancel`s a paid order, the warehouse `reject`s it. Not every path
+ends in `cancelled`: a failed delivery moves to `returned`, which the warehouse
+later writes off.
 
 Because the policy is data, the offer a UI has to render can be read off it
 instead of being hard-coded per screen:
@@ -449,6 +501,293 @@ from order_lifecycle import Entry, History
 
 machine = Machine(TABLE, PAID, History((Entry(NEW, PAID, PAY, CUSTOMER),)))
 ```
+
+## An order, end to end
+
+The sections above are one lifecycle, taken a piece at a time. Here it is whole:
+a parcel that is paid for, packed, shipped and handed over, with the ways out
+declared next to the ways forward.
+
+```python
+from order_lifecycle import (
+    CHANGED_MIND,
+    COURIER,
+    CUSTOMER,
+    DAMAGED,
+    DUPLICATE,
+    OUT_OF_STOCK,
+    SUPPORT,
+    UNDELIVERABLE,
+    WAREHOUSE,
+    CancellationPath,
+    CancellationPolicy,
+    Condition,
+    Machine,
+    State,
+    Transition,
+    TransitionTable,
+    Trigger,
+    flag,
+)
+
+NEW = State("new")
+PAID = State("paid")
+SHIPPED = State("shipped")
+RETURNED = State("returned")
+DELIVERED = State("delivered", terminal=True)
+CANCELLED = State("cancelled", terminal=True)
+
+PAY = Trigger("pay")
+SHIP = Trigger("ship")
+DELIVER = Trigger("deliver")
+CANCEL = Trigger("cancel")
+REJECT = Trigger("reject")
+FAIL = Trigger("fail")
+WRITE_OFF = Trigger("write off")
+
+PAYMENT_CONFIRMED = flag(
+    "payment_confirmed",
+    name="payment confirmed",
+    requires="the payment must be confirmed",
+)
+IN_STOCK = Condition(
+    "in stock",
+    lambda order: order["units_available"] > 0,
+    "every line item must be in stock",
+)
+ADDRESS_KNOWN = flag(
+    "address",
+    name="address known",
+    requires="the delivery address must be known",
+)
+
+def reserve_stock(move):
+    move.subject["units_available"] -= 1
+
+def notify_customer(move):
+    print(f"mail: your order is {move.target.name}")
+
+def refund(move):
+    move.subject["refunded"] = True
+
+def restock(move):
+    move.subject["units_available"] += 1
+
+def collect_parcel(move):
+    print("courier: pickup scheduled")
+
+CORE = TransitionTable(
+    (
+        Transition(NEW, PAID, PAY, roles=CUSTOMER, after=notify_customer),
+        Transition(
+            PAID,
+            SHIPPED,
+            SHIP,
+            roles=WAREHOUSE,
+            conditions=(PAYMENT_CONFIRMED, IN_STOCK),
+            before=reserve_stock,
+            after=notify_customer,
+        ),
+        Transition(
+            SHIPPED,
+            DELIVERED,
+            DELIVER,
+            roles=COURIER,
+            conditions=ADDRESS_KNOWN,
+            after=notify_customer,
+        ),
+    )
+)
+
+POLICY = CancellationPolicy(
+    (
+        CancellationPath(
+            NEW, CANCELLED, CANCEL,
+            roles={CUSTOMER, SUPPORT},
+            reasons=(CHANGED_MIND, DUPLICATE),
+        ),
+        CancellationPath(
+            PAID, CANCELLED, CANCEL,
+            roles={CUSTOMER, SUPPORT},
+            reasons=(CHANGED_MIND, DUPLICATE),
+            follow_up=refund,
+        ),
+        CancellationPath(
+            PAID, CANCELLED, REJECT,
+            roles=WAREHOUSE,
+            reasons=(OUT_OF_STOCK, DAMAGED),
+            follow_up=(refund, restock),
+        ),
+        CancellationPath(
+            SHIPPED, RETURNED, FAIL,
+            roles=COURIER,
+            reasons=(UNDELIVERABLE, DAMAGED),
+            follow_up=collect_parcel,
+        ),
+        CancellationPath(RETURNED, CANCELLED, WRITE_OFF, roles=WAREHOUSE),
+    )
+)
+
+TABLE = POLICY.extend(CORE)
+```
+
+That is the whole specification: six states, seven triggers, four actors and
+every rule about who may do what, when, and what follows. Walking a parcel
+through it touches nothing else:
+
+```python
+order = {
+    "payment_confirmed": False,
+    "units_available": 3,
+    "address": "12 Dock Road",
+}
+
+machine = Machine(TABLE, NEW)
+[t.trigger.name for t in machine.allowed(role=CUSTOMER)]   # -> ['pay', 'cancel']
+
+machine = machine.apply(PAY, role=CUSTOMER, context=order)
+machine.state                                              # -> paid
+
+machine.apply(SHIP, role=WAREHOUSE, context=order)
+# ConditionNotMet: trigger 'ship' in state 'paid' requires:
+#                  the payment must be confirmed
+
+order["payment_confirmed"] = True
+machine = machine.apply(SHIP, role=WAREHOUSE, context=order)
+order["units_available"]                                   # -> 2, the before hook reserved one
+
+machine = machine.apply(DELIVER, role=COURIER, context=order)
+machine.state                                              # -> delivered
+
+print(machine.timeline())
+# 2026-05-04T09:12:31+00:00 new --pay--> paid by customer
+# 2026-05-04T09:31:08+00:00 paid --ship--> shipped by warehouse
+# 2026-05-04T14:02:55+00:00 shipped --deliver--> delivered by courier
+```
+
+The branch that did not happen is declared in the same place. A parcel the
+courier cannot hand over travels back and is written off later, by a different
+actor, with a different reason:
+
+```python
+returned = POLICY.cancel(
+    Machine(TABLE, SHIPPED), role=COURIER, reason=UNDELIVERABLE, context=order
+)
+returned.state                     # -> returned
+
+written_off = POLICY.cancel(returned, role=WAREHOUSE, reason="unsellable")
+written_off.state                  # -> cancelled
+
+print(written_off.timeline())
+# 2026-05-04T14:40:12+00:00 shipped --fail--> returned by courier: the courier could not hand the order over
+# 2026-05-06T10:05:44+00:00 returned --write off--> cancelled by warehouse: unsellable
+```
+
+No handler in this example knows the rules of another. The endpoint that ships
+an order does not check payment, the screen that offers a cancel button does not
+know who may press it, and the support tool that answers "why?" reads the
+history rather than the logs — all three read the same table.
+
+## Persistence
+
+A `Machine` is a table, a state and a history. The table is code, so only two
+things have to survive a restart: the name of the state the order sits in, and
+the entries it has already recorded. Everything else is rebuilt by looking names
+up in the declarations above:
+
+```sql
+create table orders (
+    id       text    primary key,
+    state    text    not null,
+    history  jsonb   not null default '[]',
+    version  integer not null default 0
+);
+```
+
+The codec is two functions. `dump()` turns a machine into plain data, `load()`
+rebuilds one; `Machine(table, state, history)` and `Entry(...)` are the only
+constructors involved, and `Entry` accepts a role name as a string, so a stored
+row needs no lookup table of its own:
+
+```python
+from datetime import datetime
+
+from order_lifecycle import Entry, History, Machine
+
+STATES = {s.name: s for s in (NEW, PAID, SHIPPED, RETURNED, DELIVERED, CANCELLED)}
+TRIGGERS = {t.name: t for t in (PAY, SHIP, DELIVER, CANCEL, REJECT, FAIL, WRITE_OFF)}
+
+
+def dump(machine):
+    return {
+        "state": machine.state.name,
+        "history": [
+            {
+                "source": entry.source.name,
+                "target": entry.target.name,
+                "trigger": entry.trigger.name,
+                "role": None if entry.role is None else entry.role.name,
+                "reason": entry.reason,
+                "at": entry.at.isoformat(),
+            }
+            for entry in machine.history
+        ],
+    }
+
+
+def load(record):
+    return Machine(
+        TABLE,
+        STATES[record["state"]],
+        History(
+            tuple(
+                Entry(
+                    STATES[row["source"]],
+                    STATES[row["target"]],
+                    TRIGGERS[row["trigger"]],
+                    row["role"],
+                    row["reason"],
+                    datetime.fromisoformat(row["at"]),
+                )
+                for row in record["history"]
+            )
+        ),
+    )
+```
+
+A request handler then has one shape, whatever the trigger is:
+
+```python
+def handle(order_id, trigger, role, reason=""):
+    record, order = repository.read(order_id)
+    machine = load(record)
+    machine = machine.apply(TRIGGERS[trigger], role=role, context=order, reason=reason)
+    repository.write(order_id, dump(machine), if_version=record["version"])
+```
+
+Four properties make that loop safe:
+
+- **Nothing is written until you write it.** `apply()` builds a new machine and
+  leaves the old one alone, so a refusal raises before `write()` is reached and
+  the stored row is untouched. There is no half-applied move to clean up.
+- **A stale read is cheap to retry.** The machine is a value, not a session; on
+  a version conflict, read again, `load()` again and apply the trigger again.
+- **`load()` is not a replay.** Rehydration builds the machine directly, so no
+  hook fires and no entry is appended for moves that already happened.
+- **The history is the audit trail.** It is stored with the order rather than
+  derived at read time, so an entry written last year still reads the same after
+  the table gains a state.
+
+Hooks that write to the same database as the order commit together with the
+move. Hooks that leave it — mail, labels, payment calls — run inside `apply()`,
+before the caller has stored anything, so a crash in between leaves an effect
+without a recorded move. Have those hooks append to an outbox that is saved in
+the same transaction as `dump(machine)` and delivered afterwards.
+
+Renaming a state or a trigger changes the strings in `STATES` and `TRIGGERS`,
+which means stored rows have to be migrated the same way any stored enum does.
+Adding rows, roles, conditions or paths does not: old histories keep reading
+correctly, and only the offer a state makes changes.
 
 ## Development
 
