@@ -1,4 +1,9 @@
-"""Predicates that must hold before a transition may fire."""
+"""Predicates that must hold before a transition may fire.
+
+A context of ``None`` means absent rather than empty: a condition has nothing
+to inspect, so it refuses without running its predicate. A predicate therefore
+only ever sees a real order.
+"""
 
 from __future__ import annotations
 
@@ -54,7 +59,13 @@ class Condition:
         return self.requires or f"{self.name} must hold"
 
     def holds(self, context: Any = None) -> bool:
-        """Report whether the predicate accepts ``context``."""
+        """Report whether the predicate accepts ``context``.
+
+        An absent context refuses before the predicate runs, so a predicate is
+        free to index or read attributes off the order it is handed.
+        """
+        if context is None:
+            return False
         return bool(self.predicate(context))
 
     def check(self, context: Any = None) -> ConditionResult:
@@ -84,7 +95,10 @@ def as_conditions(
 def evaluate(
     conditions: Iterable[Condition], context: Any = None
 ) -> tuple[ConditionResult, ...]:
-    """Check every condition against ``context`` and return all results."""
+    """Check every condition against ``context`` and return all results.
+
+    An absent context fails every condition without calling a predicate.
+    """
     return tuple(condition.check(context) for condition in conditions)
 
 

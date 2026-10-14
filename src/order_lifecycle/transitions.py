@@ -73,7 +73,11 @@ class Transition:
         return tuple(result for result in self.check(context) if not result.ok)
 
     def holds(self, context: Any = None) -> bool:
-        """Report whether every condition accepts ``context``."""
+        """Report whether every condition accepts ``context``.
+
+        A conditional row refuses an absent context the way a guarded row
+        refuses an absent role, before any predicate runs.
+        """
         return not self.unmet(context)
 
     def allows(self, role: Role | str | None = None, context: Any = None) -> bool:
@@ -123,17 +127,17 @@ class TransitionTable:
         role: Role | str | None = None,
         context: Any = None,
     ) -> tuple[Transition, ...]:
-        """Return the transitions leaving ``state``.
+        """Return the transitions ``role`` may fire from ``state`` on ``context``.
 
-        ``role`` and ``context`` narrow the result when given; conditions are
-        only evaluated once a context is supplied.
+        ``None`` means absent rather than unfiltered: a guarded row needs a
+        role and a conditional row needs a context, so the listing holds
+        exactly the rows the machine would accept for the same arguments.
         """
-        rows = tuple(row for row in self.transitions if row.source == state)
-        if role is not None:
-            rows = tuple(row for row in rows if row.permits(role))
-        if context is not None:
-            rows = tuple(row for row in rows if row.holds(context))
-        return rows
+        return tuple(
+            row
+            for row in self.transitions
+            if row.source == state and row.allows(role, context)
+        )
 
     @property
     def roles(self) -> frozenset[Role]:

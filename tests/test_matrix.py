@@ -10,6 +10,7 @@ from order_lifecycle import (
     Condition,
     ConditionNotMet,
     IllegalTransition,
+    LifecycleError,
     Machine,
     RoleNotPermitted,
     State,
@@ -34,11 +35,6 @@ STATES = (NEW, PAID, SHIPPED, DELIVERED, CANCELLED)
 TRIGGERS = (PAY, SHIP, DELIVER, CANCEL)
 ROLES = (CUSTOMER, WAREHOUSE, COURIER, SUPPORT)
 
-
-def _units(order):
-    return (order or {}).get("units_available", 0)
-
-
 PAYMENT_CONFIRMED = flag(
     "payment_confirmed",
     name="payment confirmed",
@@ -46,7 +42,7 @@ PAYMENT_CONFIRMED = flag(
 )
 IN_STOCK = Condition(
     "in stock",
-    lambda order: _units(order) > 0,
+    lambda order: order["units_available"] > 0,
     "every line item must be in stock",
 )
 
@@ -271,31 +267,78 @@ def test_the_role_guard_answers_for_every_actor(source, trigger, permitted):
 
 
 OFFERS = {
-    "a new order, seen by the customer": (NEW, CUSTOMER, ("pay", "cancel")),
-    "a new order, seen by support": (NEW, SUPPORT, ("cancel",)),
-    "a paid order, seen by the warehouse": (PAID, WAREHOUSE, ("ship",)),
-    "a paid order, seen by the customer": (PAID, CUSTOMER, ("cancel",)),
-    "a paid order, seen by the courier": (PAID, COURIER, ()),
-    "a shipped order, seen by the courier": (SHIPPED, COURIER, ("deliver",)),
-    "a delivered order, seen by support": (DELIVERED, SUPPORT, ()),
-    "a cancelled order, seen by the customer": (CANCELLED, CUSTOMER, ()),
+    "a new order, seen by the customer": (NEW, CUSTOMER, None, ("pay", "cancel")),
+    "a new order, seen by support": (NEW, SUPPORT, None, ("cancel",)),
+    "a new order, seen by nobody": (NEW, None, None, ("cancel",)),
+    "a paid order, seen by the warehouse": (PAID, WAREHOUSE, READY, ("ship",)),
+    "a paid order with no order to check": (PAID, WAREHOUSE, None, ()),
+    "a paid order the warehouse may not ship yet": (PAID, WAREHOUSE, UNPAID, ()),
+    "a paid order, seen by the customer": (PAID, CUSTOMER, None, ("cancel",)),
+    "a paid order, seen by the courier": (PAID, COURIER, READY, ()),
+    "a paid order, seen by nobody": (PAID, None, READY, ()),
+    "a shipped order, seen by the courier": (SHIPPED, COURIER, None, ("deliver",)),
+    "a delivered order, seen by support": (DELIVERED, SUPPORT, None, ()),
+    "a cancelled order, seen by the customer": (CANCELLED, CUSTOMER, None, ()),
 }
 
 
-@pytest.mark.parametrize("state, role, offered", OFFERS.values(), ids=list(OFFERS))
-def test_the_offer_of_a_state_can_be_read_off_the_table(state, role, offered):
+@pytest.mark.parametrize(
+    "state, role, context, offered", OFFERS.values(), ids=list(OFFERS)
+)
+def test_the_offer_of_a_state_can_be_read_off_the_table(state, role, context, offered):
     machine = Machine(TABLE, state)
 
-    assert tuple(t.trigger.name for t in machine.allowed(role=role)) == offered
+    listed = machine.allowed(role=role, context=context)
+
+    assert tuple(row.trigger.name for row in listed) == offered
 
 
-def test_an_unready_order_narrows_the_offer_too():
-    machine = Machine(TABLE, PAID)
+CONTEXTS = (None, READY, UNPAID, EMPTY_SHELF, NOTHING_READY)
 
-    assert [t.trigger.name for t in machine.allowed(role=WAREHOUSE, context=READY)] == [
-        "ship"
-    ]
-    assert machine.allowed(role=WAREHOUSE, context=UNPAID) == ()
+
+@pytest.mark.parametrize("state", STATES, ids=lambda state: state.name)
+def test_a_listing_is_a_promise(state):
+    machine = Machine(TABLE, state)
+
+    for role in ROLES + (None,):
+        for context in CONTEXTS:
+            offered = {
+                row.trigger for row in machine.allowed(role=role, context=context)
+            }
+            for trigger in TRIGGERS:
+                accepted = machine.can(trigger, role=role, context=context)
+
+                assert accepted is (trigger in offered)
+
+                if accepted:
+                    moved = machine.apply(trigger, role=role, context=context)
+                    assert moved.state == TABLE.find(state, trigger).target
+                else:
+                    with pytest.raises(LifecycleError):
+                        machine.apply(trigger, role=role, context=context)
+
+
+def test_a_predicate_never_sees_an_absent_context():
+    seen = []
+
+    def units_in_stock(order):
+        seen.append(order)
+        return order["units_available"] > 0
+
+    strict = Condition("in stock", units_in_stock, "every line item must be in stock")
+    table = TransitionTable((Transition(PAID, SHIPPED, SHIP, conditions=strict),))
+    machine = Machine(table, PAID)
+
+    assert machine.can(SHIP) is False
+    assert machine.allowed() == ()
+    with pytest.raises(ConditionNotMet) as refusal:
+        machine.apply(SHIP)
+
+    assert "every line item must be in stock" in str(refusal.value)
+    assert seen == []
+
+    assert machine.can(SHIP, context=READY)
+    assert seen == [READY]
 
 
 def test_the_whole_legal_path_is_walked_and_recorded():

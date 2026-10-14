@@ -27,7 +27,11 @@ class Machine:
     def allowed(
         self, *, role: Role | str | None = None, context: Any = None
     ) -> tuple[Transition, ...]:
-        """Return the transitions ``role`` may take from the current state."""
+        """Return the transitions ``role`` may take on ``context`` right now.
+
+        The listing is what ``apply`` accepts for the same arguments: an absent
+        role hides a guarded transition, an absent context a conditional one.
+        """
         return self.table.available(self.state, role=role, context=context)
 
     def resolve(
@@ -44,7 +48,9 @@ class Machine:
         """
         transition = self.table.find(self.state, trigger)
         if transition is None:
-            raise IllegalTransition(self.state, trigger, self.allowed(role=role))
+            raise IllegalTransition(
+                self.state, trigger, self.allowed(role=role, context=context)
+            )
         if not transition.permits(role):
             raise RoleNotPermitted(transition, role)
         unmet = transition.unmet(context)
