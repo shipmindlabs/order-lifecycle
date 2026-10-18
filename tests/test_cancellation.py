@@ -15,6 +15,8 @@ from order_lifecycle import (
     CancellationPath,
     CancellationPolicy,
     CannotCancel,
+    Condition,
+    ConditionNotMet,
     Machine,
     ReasonNotAccepted,
     RoleNotPermitted,
@@ -173,6 +175,58 @@ def test_the_offer_can_be_read_off_the_policy(policy):
         "shipped --fail--> returned [courier] (undeliverable, damaged) "
         "-> collect parcel"
     ]
+
+
+def test_a_guarded_path_is_not_offered_without_a_role(policy, table):
+    assert policy.available(PAID) == ()
+    assert policy.reasons_for(PAID) == ()
+    assert [path.trigger for path in policy.available(PAID, role=CUSTOMER)] == [CANCEL]
+
+    with pytest.raises(CannotCancel):
+        policy.cancel(Machine(table, PAID), reason=CHANGED_MIND)
+
+
+def test_a_conditional_path_is_not_offered_without_a_context():
+    seen = []
+
+    def refund_issued(order):
+        seen.append(order)
+        return bool(order["refunded"])
+
+    policy = CancellationPolicy(
+        (
+            CancellationPath(
+                PAID,
+                CANCELLED,
+                CANCEL,
+                roles=CUSTOMER,
+                reasons=CHANGED_MIND,
+                conditions=Condition(
+                    "refund issued", refund_issued, "the refund must be issued"
+                ),
+            ),
+        )
+    )
+    machine = Machine(policy.extend(CORE), PAID)
+
+    assert policy.available(PAID, role=CUSTOMER) == ()
+    assert policy.reasons_for(PAID, role=CUSTOMER) == ()
+    assert seen == []
+
+    with pytest.raises(ConditionNotMet) as refusal:
+        policy.cancel(machine, role=CUSTOMER, reason=CHANGED_MIND)
+
+    assert "the refund must be issued" in str(refusal.value)
+    assert seen == []
+
+    refunded = {"refunded": True}
+
+    assert policy.reasons_for(PAID, role=CUSTOMER, context=refunded) == (CHANGED_MIND,)
+    assert seen == [refunded]
+
+    moved = policy.cancel(machine, role=CUSTOMER, reason=CHANGED_MIND, context=refunded)
+
+    assert moved.state == CANCELLED
 
 
 def test_the_role_guard_still_applies_to_the_move(table):

@@ -228,13 +228,17 @@ class CancellationPolicy:
         role: Role | str | None = None,
         context: Any = None,
     ) -> tuple[CancellationPath, ...]:
-        """Return the paths leaving ``state``, narrowed by role and context."""
-        rows = tuple(path for path in self.paths if path.source == state)
-        if role is not None:
-            rows = tuple(path for path in rows if path.permits(role))
-        if context is not None:
-            rows = tuple(path for path in rows if path.transition.holds(context))
-        return rows
+        """Return the paths ``role`` may take out of ``state`` on ``context``.
+
+        ``None`` means absent rather than unfiltered, exactly as it does for a
+        transition table: a guarded path needs a role and a conditional one an
+        order to inspect, so the listing holds the paths ``cancel`` accepts.
+        """
+        return tuple(
+            path
+            for path in self.paths
+            if path.source == state and path.transition.allows(role, context)
+        )
 
     def actors(self, state: State) -> frozenset[Role]:
         """Return every actor a path leaving ``state`` names."""
@@ -243,11 +247,15 @@ class CancellationPolicy:
         )
 
     def reasons_for(
-        self, state: State, *, role: Role | str | None = None
+        self,
+        state: State,
+        *,
+        role: Role | str | None = None,
+        context: Any = None,
     ) -> tuple[CancellationReason, ...]:
-        """Return the reasons ``role`` may cancel an order in ``state`` with."""
+        """Return the reasons ``role`` may cancel ``state`` with on ``context``."""
         seen: dict[CancellationReason, None] = {}
-        for path in self.available(state, role=role):
+        for path in self.available(state, role=role, context=context):
             for reason in path.reasons:
                 seen.setdefault(reason, None)
         return tuple(seen)
