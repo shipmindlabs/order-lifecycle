@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping
 
 from .roles import Role, as_role
 from .states import State, Trigger
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
-    from .transitions import Transition
+    from .transitions import Transition, TransitionTable
 
 __all__ = ["Entry", "History", "EMPTY_HISTORY"]
 
@@ -18,6 +18,15 @@ __all__ = ["Entry", "History", "EMPTY_HISTORY"]
 def _now() -> datetime:
     """Return the moment a move is recorded at, in UTC."""
     return datetime.now(timezone.utc)
+
+
+def _as_moment(value: str | datetime | None) -> datetime:
+    """Accept a stored timestamp, as text or already parsed by the driver."""
+    if isinstance(value, datetime):
+        return value
+    if value:
+        return datetime.fromisoformat(value)
+    return _now()
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +68,35 @@ class Entry:
     def actor(self) -> str:
         """Return the name of the acting role, or ``'anyone'`` when open."""
         return self.role.name if self.role is not None else "anyone"
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return this move as plain data: names, a sentence and a timestamp."""
+        return {
+            "source": self.source.name,
+            "target": self.target.name,
+            "trigger": self.trigger.name,
+            "role": None if self.role is None else self.role.name,
+            "reason": self.reason,
+            "at": self.at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        table: "TransitionTable",
+        row: Mapping[str, Any],
+        *,
+        field: str = "entry",
+    ) -> "Entry":
+        """Rebuild a move from ``row``, resolving its names in ``table``."""
+        return cls(
+            table.state(row["source"], field=f"{field}.source"),
+            table.state(row["target"], field=f"{field}.target"),
+            table.trigger(row["trigger"], field=f"{field}.trigger"),
+            row.get("role"),
+            row.get("reason", ""),
+            _as_moment(row.get("at")),
+        )
 
     def __str__(self) -> str:
         line = (
@@ -129,6 +167,30 @@ class History:
     def since(self, moment: datetime) -> tuple[Entry, ...]:
         """Return the moves recorded at or after ``moment``."""
         return tuple(e for e in self.entries if e.at >= moment)
+
+    def as_dicts(self) -> tuple[dict[str, Any], ...]:
+        """Return every recorded move as plain data, oldest first."""
+        return tuple(entry.as_dict() for entry in self.entries)
+
+    @classmethod
+    def from_dicts(
+        cls,
+        table: "TransitionTable",
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        field: str = "history",
+    ) -> "History":
+        """Rebuild a history from ``rows``, resolving their names in ``table``.
+
+        A name the table does not declare is refused with the index of the row
+        carrying it, so a stored history says which move no longer reads.
+        """
+        return cls(
+            tuple(
+                Entry.from_dict(table, row, field=f"{field}[{position}]")
+                for position, row in enumerate(rows)
+            )
+        )
 
     def timeline(self) -> str:
         """Render the history as one readable line per move."""

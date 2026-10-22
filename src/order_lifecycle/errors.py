@@ -8,10 +8,10 @@ from .conditions import Condition, ConditionResult
 from .hooks import Hook, TransitionContext
 from .roles import Role
 from .states import State, Trigger
-from .transitions import Transition
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .cancellation import CancellationPath, CancellationReason
+    from .transitions import Transition
 
 __all__ = [
     "LifecycleError",
@@ -19,6 +19,7 @@ __all__ = [
     "RoleNotPermitted",
     "ConditionNotMet",
     "HookFailed",
+    "UnknownName",
     "CannotCancel",
     "ReasonNotAccepted",
 ]
@@ -119,6 +120,29 @@ class HookFailed(LifecycleError):
             f"{type(cause).__name__}: {cause}; the order stays in "
             f"{transition.source.name!r}"
         )
+
+
+class UnknownName(LifecycleError):
+    """A stored name matches no state or trigger the table declares."""
+
+    def __init__(
+        self,
+        kind: str,
+        name: str,
+        known: Iterable[str] = (),
+        field: str = "",
+    ) -> None:
+        self.kind = kind
+        self.name = name
+        self.known = tuple(known)
+        self.field = field
+        where = f" at {field!r}" if field else ""
+        offer = (
+            f"the table declares {', '.join(self.known)}"
+            if self.known
+            else f"the table declares no {kind}"
+        )
+        super().__init__(f"unknown {kind} {name!r}{where}: {offer}")
 
 
 class CannotCancel(LifecycleError):

@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from .conditions import ALWAYS, Condition, ConditionResult, as_conditions, evaluate
+from .errors import UnknownName
 from .hooks import NO_HOOKS, Hook, as_hooks
 from .roles import ANYONE, Role, as_roles
 from .states import State, Trigger
 
 __all__ = ["Transition", "TransitionTable"]
+
+_Named = TypeVar("_Named", State, Trigger)
+
+
+def _declare(known: dict[str, _Named], kind: str, value: _Named) -> None:
+    """Record ``value`` under its name, refusing two meanings for one name."""
+    present = known.setdefault(value.name, value)
+    if present != value:
+        raise ValueError(
+            f"two different {kind}s are named {value.name!r}; a stored name "
+            "cannot be resolved to one of them"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,10 +114,18 @@ class TransitionTable:
     _index: dict[tuple[State, Trigger], Transition] = field(
         init=False, repr=False, compare=False, default_factory=dict
     )
+    _states: dict[str, State] = field(
+        init=False, repr=False, compare=False, default_factory=dict
+    )
+    _triggers: dict[str, Trigger] = field(
+        init=False, repr=False, compare=False, default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         rows = tuple(self.transitions)
         index: dict[tuple[State, Trigger], Transition] = {}
+        states: dict[str, State] = {}
+        triggers: dict[str, Trigger] = {}
         for row in rows:
             key = (row.source, row.trigger)
             if key in index:
@@ -113,8 +134,13 @@ class TransitionTable:
                     f"and trigger {row.trigger.name!r}"
                 )
             index[key] = row
+            _declare(states, "state", row.source)
+            _declare(states, "state", row.target)
+            _declare(triggers, "trigger", row.trigger)
         object.__setattr__(self, "transitions", rows)
         object.__setattr__(self, "_index", index)
+        object.__setattr__(self, "_states", states)
+        object.__setattr__(self, "_triggers", triggers)
 
     def find(self, state: State, trigger: Trigger) -> Transition | None:
         """Return the transition leaving ``state`` on ``trigger``, if any."""
@@ -138,6 +164,34 @@ class TransitionTable:
             for row in self.transitions
             if row.source == state and row.allows(role, context)
         )
+
+    @property
+    def states(self) -> tuple[State, ...]:
+        """Return every state this table mentions, in declaration order."""
+        return tuple(self._states.values())
+
+    @property
+    def triggers(self) -> tuple[Trigger, ...]:
+        """Return every trigger this table declares, in declaration order."""
+        return tuple(self._triggers.values())
+
+    def state(self, name: str, *, field: str = "") -> State:
+        """Return the state called ``name``, or refuse the name.
+
+        ``field`` names the place the name came from, so a stored row that no
+        longer matches the declarations says which cell is at fault.
+        """
+        found = self._states.get(name)
+        if found is None:
+            raise UnknownName("state", name, tuple(self._states), field)
+        return found
+
+    def trigger(self, name: str, *, field: str = "") -> Trigger:
+        """Return the trigger called ``name``, or refuse the name."""
+        found = self._triggers.get(name)
+        if found is None:
+            raise UnknownName("trigger", name, tuple(self._triggers), field)
+        return found
 
     @property
     def roles(self) -> frozenset[Role]:

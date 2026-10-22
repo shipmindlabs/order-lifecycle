@@ -21,6 +21,7 @@ from .errors import (
     LifecycleError,
     ReasonNotAccepted,
     RoleNotPermitted,
+    UnknownName,
 )
 from .history import EMPTY_HISTORY, Entry, History
 from .hooks import NO_HOOKS, Hook, TransitionContext
@@ -66,6 +67,7 @@ __all__ = [
     "RoleNotPermitted",
     "ConditionNotMet",
     "HookFailed",
+    "UnknownName",
     "CannotCancel",
     "ReasonNotAccepted",
     "__version__",

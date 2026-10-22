@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, Mapping
 
 from .errors import ConditionNotMet, HookFailed, IllegalTransition, RoleNotPermitted
 from .history import EMPTY_HISTORY, History
@@ -23,6 +23,24 @@ class Machine:
     table: TransitionTable
     state: State
     history: History = EMPTY_HISTORY
+
+    @classmethod
+    def from_record(cls, table: TransitionTable, record: Mapping[str, Any]) -> Machine:
+        """Rebuild the machine ``as_record`` stored, resolving names in ``table``.
+
+        The moves in the record already happened, so none of them is replayed:
+        no hook fires and no entry is appended. A name the table does not
+        declare raises ``UnknownName`` naming the field it came from.
+        """
+        return cls(
+            table,
+            table.state(record["state"], field="state"),
+            History.from_dicts(table, record.get("history", ()), field="history"),
+        )
+
+    def as_record(self) -> dict[str, Any]:
+        """Return the state name and the recorded moves as storable data."""
+        return {"state": self.state.name, "history": list(self.history.as_dicts())}
 
     def allowed(
         self, *, role: Role | str | None = None, context: Any = None
