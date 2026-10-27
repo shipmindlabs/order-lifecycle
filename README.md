@@ -7,7 +7,8 @@ cancellation paths and a readable history.
 
 Early development. States, transitions, role guards, guard conditions, hooks and
 cancellation paths can be declared as data and applied through the machine,
-which keeps an append-only history of every accepted move.
+which keeps an append-only history of every accepted move and rehydrates from a
+stored record without replaying it.
 
 ## Installation
 
@@ -109,7 +110,17 @@ TABLE.available(PAID, role=WAREHOUSE)     # -> (paid --ship--> shipped [warehous
 ```
 
 Every type is a frozen dataclass, so tables are hashable, comparable and safe to
-share as module-level constants.
+share as module-level constants. A table is also the vocabulary of the
+lifecycle: it knows every state and trigger it mentions by name, which is what
+makes a stored order rehydratable.
+
+```python
+TABLE.states    # -> (new, paid, shipped, delivered, cancelled)
+TABLE.triggers  # -> (pay, ship, deliver, cancel)
+```
+
+Two different states sharing a name are refused when the table is built, because
+a stored name could no longer be resolved to one of them.
 
 ## Role guards
 
@@ -493,14 +504,125 @@ machine.history.since(this_morning) # -> the moves recorded since a moment
 
 The timestamp defaults to the moment of the move; pass `at=` to `apply()` when
 the caller owns the clock, for backfills or reproducible tests. A machine can
-also be built with a history it already has, which is how an order is rehydrated
-from storage:
+also be built with a history it already has:
 
 ```python
 from order_lifecycle import Entry, History
 
 machine = Machine(TABLE, PAID, History((Entry(NEW, PAID, PAY, CUSTOMER),)))
 ```
+
+## Persistence
+
+A `Machine` is a table, a state and a history. The table is code, so only two
+things have to survive a restart: the name of the state the order sits in, and
+the entries it has already recorded. Everything else is rebuilt by looking names
+up in the declarations above:
+
+```sql
+create table orders (
+    id       text    primary key,
+    state    text    not null,
+    history  jsonb   not null default '[]',
+    version  integer not null default 0
+);
+```
+
+The codec comes with the machine. `as_record()` turns it into plain data — names,
+sentences and ISO timestamps, nothing a JSON encoder has to be taught — and
+`from_record()` rebuilds it by resolving those names in the table:
+
+```python
+record = machine.as_record()
+# {'state': 'shipped',
+#  'history': [{'source': 'new', 'target': 'paid', 'trigger': 'pay',
+#               'role': 'customer', 'reason': '',
+#               'at': '2026-05-04T09:12:31+00:00'},
+#              {'source': 'paid', 'target': 'shipped', 'trigger': 'ship',
+#               'role': 'warehouse', 'reason': 'packed today',
+#               'at': '2026-05-04T09:31:08+00:00'}]}
+
+back = Machine.from_record(TABLE, record)
+back.state                   # -> shipped
+back.history.last.role       # -> Role('warehouse')
+back == machine              # -> True
+```
+
+The table owns the vocabulary, so no project needs a `STATES` and `TRIGGERS`
+dictionary of its own:
+
+```python
+TABLE.states            # -> (new, paid, shipped, delivered, cancelled, returned)
+TABLE.triggers          # -> (pay, ship, deliver, cancel, reject, fail, write off)
+TABLE.state("paid")     # -> paid
+TABLE.trigger("ship")   # -> ship
+```
+
+The moves serialise on their own too, which is what a project storing a timeline
+in a table of its own needs:
+
+```python
+rows = machine.history.as_dicts()   # a tuple of plain dicts, oldest first
+History.from_dicts(TABLE, rows)     # the same history back
+Entry.from_dict(TABLE, rows[0])     # a single move back
+```
+
+A request handler then has one shape, whatever the trigger is:
+
+```python
+def handle(order_id, trigger, role, reason=""):
+    record, order = repository.read(order_id)
+    machine = Machine.from_record(TABLE, record)
+    machine = machine.apply(
+        TABLE.trigger(trigger), role=role, context=order, reason=reason
+    )
+    repository.write(order_id, machine.as_record(), if_version=record["version"])
+```
+
+Four properties make that loop safe:
+
+- **Nothing is written until you write it.** `apply()` builds a new machine and
+  leaves the old one alone, so a refusal raises before `write()` is reached and
+  the stored row is untouched. There is no half-applied move to clean up.
+- **A stale read is cheap to retry.** The machine is a value, not a session; on
+  a version conflict, read again, rehydrate again and apply the trigger again.
+- **`from_record()` is not a replay.** The moves in the record already happened,
+  so rehydration fires no hook and appends no entry for them.
+- **The history is the audit trail.** It is stored with the order rather than
+  derived at read time, so an entry written last year still reads the same after
+  the table gains a state.
+
+Hooks that write to the same database as the order commit together with the
+move. Hooks that leave it — mail, labels, payment calls — run inside `apply()`,
+before the caller has stored anything, so a crash in between leaves an effect
+without a recorded move. Have those hooks append to an outbox that is saved in
+the same transaction as the record and delivered afterwards.
+
+A name the table no longer declares is refused rather than guessed, and the
+refusal says which cell of the row is at fault:
+
+```python
+from order_lifecycle import UnknownName
+
+try:
+    Machine.from_record(TABLE, {"state": "packed", "history": []})
+except UnknownName as error:
+    error.kind     # -> 'state'
+    error.name     # -> 'packed'
+    error.field    # -> 'state'
+# UnknownName: unknown state 'packed' at 'state':
+#              the table declares new, paid, shipped, delivered, cancelled, returned
+
+record["history"][1]["trigger"] = "dispatch"
+Machine.from_record(TABLE, record)
+# UnknownName: unknown trigger 'dispatch' at 'history[1].trigger': ...
+```
+
+Renaming a state or a trigger therefore means migrating stored rows, the way any
+stored enum does; until they are migrated, the rehydration points at the move
+that no longer reads. Adding rows, roles, conditions or paths needs no
+migration: old histories keep reading correctly, and only the offer a state
+makes changes.
 
 ## An order, end to end
 
@@ -688,111 +810,11 @@ an order does not check payment, the screen that offers a cancel button does not
 know who may press it, and the support tool that answers "why?" reads the
 history rather than the logs — all three read the same table.
 
-## Persistence
-
-A `Machine` is a table, a state and a history. The table is code, so only two
-things have to survive a restart: the name of the state the order sits in, and
-the entries it has already recorded. Everything else is rebuilt by looking names
-up in the declarations above:
-
-```sql
-create table orders (
-    id       text    primary key,
-    state    text    not null,
-    history  jsonb   not null default '[]',
-    version  integer not null default 0
-);
-```
-
-The codec is two functions. `dump()` turns a machine into plain data, `load()`
-rebuilds one; `Machine(table, state, history)` and `Entry(...)` are the only
-constructors involved, and `Entry` accepts a role name as a string, so a stored
-row needs no lookup table of its own:
-
-```python
-from datetime import datetime
-
-from order_lifecycle import Entry, History, Machine
-
-STATES = {s.name: s for s in (NEW, PAID, SHIPPED, RETURNED, DELIVERED, CANCELLED)}
-TRIGGERS = {t.name: t for t in (PAY, SHIP, DELIVER, CANCEL, REJECT, FAIL, WRITE_OFF)}
-
-
-def dump(machine):
-    return {
-        "state": machine.state.name,
-        "history": [
-            {
-                "source": entry.source.name,
-                "target": entry.target.name,
-                "trigger": entry.trigger.name,
-                "role": None if entry.role is None else entry.role.name,
-                "reason": entry.reason,
-                "at": entry.at.isoformat(),
-            }
-            for entry in machine.history
-        ],
-    }
-
-
-def load(record):
-    return Machine(
-        TABLE,
-        STATES[record["state"]],
-        History(
-            tuple(
-                Entry(
-                    STATES[row["source"]],
-                    STATES[row["target"]],
-                    TRIGGERS[row["trigger"]],
-                    row["role"],
-                    row["reason"],
-                    datetime.fromisoformat(row["at"]),
-                )
-                for row in record["history"]
-            )
-        ),
-    )
-```
-
-A request handler then has one shape, whatever the trigger is:
-
-```python
-def handle(order_id, trigger, role, reason=""):
-    record, order = repository.read(order_id)
-    machine = load(record)
-    machine = machine.apply(TRIGGERS[trigger], role=role, context=order, reason=reason)
-    repository.write(order_id, dump(machine), if_version=record["version"])
-```
-
-Four properties make that loop safe:
-
-- **Nothing is written until you write it.** `apply()` builds a new machine and
-  leaves the old one alone, so a refusal raises before `write()` is reached and
-  the stored row is untouched. There is no half-applied move to clean up.
-- **A stale read is cheap to retry.** The machine is a value, not a session; on
-  a version conflict, read again, `load()` again and apply the trigger again.
-- **`load()` is not a replay.** Rehydration builds the machine directly, so no
-  hook fires and no entry is appended for moves that already happened.
-- **The history is the audit trail.** It is stored with the order rather than
-  derived at read time, so an entry written last year still reads the same after
-  the table gains a state.
-
-Hooks that write to the same database as the order commit together with the
-move. Hooks that leave it — mail, labels, payment calls — run inside `apply()`,
-before the caller has stored anything, so a crash in between leaves an effect
-without a recorded move. Have those hooks append to an outbox that is saved in
-the same transaction as `dump(machine)` and delivered afterwards.
-
-Renaming a state or a trigger changes the strings in `STATES` and `TRIGGERS`,
-which means stored rows have to be migrated the same way any stored enum does.
-Adding rows, roles, conditions or paths does not: old histories keep reading
-correctly, and only the offer a state makes changes.
-
 ## Development
 
 ```bash
 pip install -e .
+python -m pytest
 ```
 
 ## License
