@@ -316,7 +316,7 @@ would have been accepted instead:
 ```python
 machine.apply(PAY, role=CUSTOMER)
 # IllegalTransition: cannot apply trigger 'pay' in state 'paid':
-#                    allowed here: cancel, ship
+#                    for customer: cancel; ship needs warehouse
 
 machine.apply(SHIP, role=CUSTOMER)
 # RoleNotPermitted: trigger 'ship' in state 'paid' requires one of: warehouse;
@@ -325,6 +325,26 @@ machine.apply(SHIP, role=CUSTOMER)
 machine.apply(SHIP, role=WAREHOUSE, context={"payment_confirmed": False, "units_available": 3})
 # ConditionNotMet: trigger 'ship' in state 'paid' requires:
 #                  the payment must be confirmed
+```
+
+The offer an `IllegalTransition` makes is addressed to the actor that asked: the
+triggers this role may fire right now, and what each of the other rows out of
+the state still needs. An actor with no way out of a state therefore hears who
+has one instead of being told that nothing is allowed:
+
+```python
+machine.apply(PAY, role=COURIER)
+# IllegalTransition: cannot apply trigger 'pay' in state 'paid':
+#                    nothing here for courier; ship needs warehouse;
+#                    cancel needs customer or support
+
+try:
+    machine.apply(PAY, role=CUSTOMER)
+except IllegalTransition as error:
+    error.actor         # -> 'customer', or 'anyone' when no role was supplied
+    error.allowed       # -> (paid --cancel--> cancelled [customer, support],)
+    error.others        # -> the rows out of paid this actor may not take
+    error.requirements  # -> ('ship needs warehouse',)
 ```
 
 Both guards are checked in `resolve()`, before the machine moves — the role

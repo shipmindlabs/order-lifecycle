@@ -133,7 +133,7 @@ REFUSALS = {
         CUSTOMER,
         None,
         IllegalTransition,
-        "nothing is allowed here",
+        "nothing here for customer; deliver needs courier",
     ),
     "the wrong actor ships": (
         PAID,
@@ -382,9 +382,48 @@ def test_an_unready_order_is_told_everything_it_lacks():
     ]
 
 
-def test_a_refusal_offers_what_would_have_been_accepted():
+def test_a_refusal_offers_what_this_actor_may_do_here():
     with pytest.raises(IllegalTransition) as refusal:
         Machine(TABLE, PAID).apply(PAY, role=CUSTOMER)
 
+    assert refusal.value.actor == "customer"
     assert {t.trigger.name for t in refusal.value.allowed} == {"cancel"}
-    assert "allowed here: cancel" in str(refusal.value)
+    assert refusal.value.requirements == ("ship needs warehouse",)
+    assert "for customer: cancel; ship needs warehouse" in str(refusal.value)
+
+
+def test_a_refusal_names_the_actor_another_row_waits_for():
+    with pytest.raises(IllegalTransition) as refusal:
+        Machine(TABLE, SHIPPED).apply(PAY, role=CUSTOMER)
+
+    assert refusal.value.allowed == ()
+    assert [row.trigger.name for row in refusal.value.others] == ["deliver"]
+    assert "nothing here for customer; deliver needs courier" in str(refusal.value)
+
+
+def test_a_refusal_names_the_condition_a_permitted_row_still_lacks():
+    with pytest.raises(IllegalTransition) as refusal:
+        Machine(TABLE, PAID).apply(DELIVER, role=WAREHOUSE, context=UNPAID)
+
+    assert refusal.value.requirements == (
+        "ship needs payment confirmed",
+        "cancel needs customer or support",
+    )
+    assert "nothing here for warehouse" in str(refusal.value)
+
+
+def test_a_refusal_without_a_role_offers_the_open_rows():
+    with pytest.raises(IllegalTransition) as refusal:
+        Machine(TABLE, NEW).apply(SHIP)
+
+    assert refusal.value.actor == "anyone"
+    assert "for anyone: cancel; pay needs customer" in str(refusal.value)
+
+
+def test_a_state_nothing_leaves_says_so():
+    table = TransitionTable((Transition(NEW, PAID, PAY, roles=CUSTOMER),))
+
+    with pytest.raises(IllegalTransition) as refusal:
+        Machine(table, PAID).apply(PAY, role=CUSTOMER)
+
+    assert "nothing leaves 'paid'" in str(refusal.value)

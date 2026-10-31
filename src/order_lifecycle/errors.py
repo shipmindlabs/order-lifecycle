@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from .conditions import Condition, ConditionResult
 from .hooks import Hook, TransitionContext
@@ -29,6 +29,15 @@ class LifecycleError(Exception):
     """Base class for every error raised by this package."""
 
 
+def _requirement(transition: "Transition", role: Role | str | None, context: Any) -> str:
+    """Say what ``transition`` still wants before ``role`` could fire it."""
+    if not transition.permits(role):
+        who = " or ".join(sorted(r.name for r in transition.roles))
+        return f"{transition.trigger.name} needs {who}"
+    unmet = ", ".join(result.condition.name for result in transition.unmet(context))
+    return f"{transition.trigger.name} needs {unmet}" if unmet else ""
+
+
 class IllegalTransition(LifecycleError):
     """No transition leaves the current state on the given trigger."""
 
@@ -36,23 +45,43 @@ class IllegalTransition(LifecycleError):
         self,
         state: State,
         trigger: Trigger,
-        allowed: tuple[Transition, ...] = (),
+        allowed: Iterable[Transition] = (),
+        others: Iterable[Transition] = (),
+        *,
+        role: Role | str | None = None,
+        context: Any = None,
     ) -> None:
         self.state = state
         self.trigger = trigger
         self.allowed = tuple(allowed)
+        self.others = tuple(others)
+        self.role = role
+        self.requirements = tuple(
+            phrase
+            for phrase in (_requirement(row, role, context) for row in self.others)
+            if phrase
+        )
         super().__init__(
             f"cannot apply trigger {trigger.name!r} in state {state.name!r}: "
             f"{self._offer()}"
         )
 
+    @property
+    def actor(self) -> str:
+        """Return the refused actor, or ``'anyone'`` when no role was supplied."""
+        return "anyone" if self.role is None else str(self.role)
+
     def _offer(self) -> str:
         if self.allowed:
             names = ", ".join(sorted(t.trigger.name for t in self.allowed))
-            return f"allowed here: {names}"
-        if self.state.terminal:
+            head = f"for {self.actor}: {names}"
+        elif self.others:
+            head = f"nothing here for {self.actor}"
+        elif self.state.terminal:
             return f"{self.state.name!r} is a terminal state"
-        return "nothing is allowed here"
+        else:
+            return f"nothing leaves {self.state.name!r}"
+        return "; ".join((head,) + self.requirements)
 
 
 class RoleNotPermitted(LifecycleError):

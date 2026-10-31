@@ -62,12 +62,23 @@ class Machine:
         """Return the transition ``trigger`` would take, or raise a typed error.
 
         The role guard and then the conditions are checked here, before the
-        state moves.
+        state moves. An undeclared trigger is refused with the offer this actor
+        has here and what the remaining rows out of the state still need.
         """
         transition = self.table.find(self.state, trigger)
         if transition is None:
+            offered = self.allowed(role=role, context=context)
             raise IllegalTransition(
-                self.state, trigger, self.allowed(role=role, context=context)
+                self.state,
+                trigger,
+                offered,
+                tuple(
+                    row
+                    for row in self.table
+                    if row.source == self.state and row not in offered
+                ),
+                role=role,
+                context=context,
             )
         if not transition.permits(role):
             raise RoleNotPermitted(transition, role)
