@@ -1,5 +1,6 @@
 """Declarative state machine for order lifecycles."""
 
+from .audit import Audit
 from .cancellation import (
     CHANGED_MIND,
     DAMAGED,
@@ -51,6 +52,7 @@ __all__ = [
     "EMPTY_HISTORY",
     "Transition",
     "TransitionTable",
+    "Audit",
     "Machine",
     "CancellationReason",
     "CancellationPath",

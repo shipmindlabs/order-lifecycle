@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+from .audit import Audit
 from .conditions import ALWAYS, Condition, ConditionResult, as_conditions, evaluate
 from .errors import UnknownName
 from .hooks import NO_HOOKS, Hook, as_hooks
@@ -146,6 +147,14 @@ class TransitionTable:
         """Return the transition leaving ``state`` on ``trigger``, if any."""
         return self._index.get((state, trigger))
 
+    def outgoing(self, state: State) -> tuple[Transition, ...]:
+        """Return every transition declared to leave ``state``."""
+        return tuple(row for row in self.transitions if row.source == state)
+
+    def incoming(self, state: State) -> tuple[Transition, ...]:
+        """Return every transition declared to arrive at ``state``."""
+        return tuple(row for row in self.transitions if row.target == state)
+
     def available(
         self,
         state: State,
@@ -174,6 +183,11 @@ class TransitionTable:
     def triggers(self) -> tuple[Trigger, ...]:
         """Return every trigger this table declares, in declaration order."""
         return tuple(self._triggers.values())
+
+    @property
+    def terminals(self) -> tuple[State, ...]:
+        """Return every state an order may end in, in declaration order."""
+        return tuple(state for state in self.states if state.terminal)
 
     def state(self, name: str, *, field: str = "") -> State:
         """Return the state called ``name``, or refuse the name.
@@ -210,6 +224,46 @@ class TransitionTable:
     def for_role(self, role: Role | str) -> tuple[Transition, ...]:
         """Return every transition ``role`` may fire, guarded or open."""
         return tuple(row for row in self.transitions if row.permits(role))
+
+    def reachable(self, start: State) -> tuple[State, ...]:
+        """Return the states an order can arrive in from ``start``.
+
+        Role guards and conditions are ignored: this asks what the table
+        declares, not what an actor may do at a given moment. ``start`` comes
+        first, the rest follow in the declaration order of the table.
+        """
+        found = {start}
+        pending = [start]
+        while pending:
+            for row in self.outgoing(pending.pop()):
+                if row.target not in found:
+                    found.add(row.target)
+                    pending.append(row.target)
+        return (start,) + tuple(
+            state for state in self.states if state in found and state != start
+        )
+
+    def dead_ends(self) -> tuple[State, ...]:
+        """Return the states that are not terminal and that nothing leaves."""
+        return tuple(
+            state
+            for state in self.states
+            if not state.terminal and not self.outgoing(state)
+        )
+
+    def audit(self, start: State) -> Audit:
+        """Read the table from ``start`` and report what it gets wrong.
+
+        Two mistakes a table can hold are visible without running anything: a
+        state no row leads to, and a state an order enters but cannot leave.
+        """
+        reachable = self.reachable(start)
+        return Audit(
+            start,
+            reachable,
+            tuple(state for state in self.states if state not in reachable),
+            self.dead_ends(),
+        )
 
     def __iter__(self):
         return iter(self.transitions)

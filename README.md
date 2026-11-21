@@ -8,7 +8,8 @@ cancellation paths and a readable history.
 Early development. States, transitions, role guards, guard conditions, hooks and
 cancellation paths can be declared as data and applied through the machine,
 which keeps an append-only history of every accepted move and rehydrates from a
-stored record without replaying it.
+stored record without replaying it. The table itself can be read for states
+nothing reaches and states nothing leaves.
 
 ## Installation
 
@@ -121,6 +122,57 @@ TABLE.triggers  # -> (pay, ship, deliver, cancel)
 
 Two different states sharing a name are refused when the table is built, because
 a stored name could no longer be resolved to one of them.
+
+## Auditing a lifecycle
+
+A table is a graph, and a graph can be read before anything runs. Two mistakes
+cost the most: a state no row leads to, and a state an order can enter but never
+leave. Both are a question to the table rather than a bug report from
+production:
+
+```python
+audit = TABLE.audit(NEW)
+
+audit.ok           # -> True, every state is reached and every state leads on
+audit.reachable    # -> (new, paid, shipped, delivered, cancelled)
+audit.unreachable  # -> ()
+audit.dead_ends    # -> ()
+```
+
+A state that was added without a way in, or without a way out, is named together
+with the sentence saying what is wrong with it:
+
+```python
+PACKED = State("packed")
+LOST = State("lost")
+
+DRAFT = TransitionTable(
+    (
+        Transition(NEW, PAID, PAY, roles=CUSTOMER),
+        Transition(PAID, PACKED, SHIP, roles=WAREHOUSE),
+        Transition(LOST, CANCELLED, Trigger("write off"), roles=SUPPORT),
+    )
+)
+
+audit = DRAFT.audit(NEW)
+audit.ok         # -> False
+audit.problems
+# -> ('lost is never reached from new',
+#     'cancelled is never reached from new',
+#     'packed is not terminal and nothing leaves it')
+```
+
+A terminal state is never a dead end — ending there is the point. Reachability
+ignores roles and conditions: it asks what the table declares, not what an actor
+may do at a given moment. The rows around a state are readable on their own,
+which is what drawing a diagram of a lifecycle needs:
+
+```python
+TABLE.outgoing(PAID)   # -> the rows leaving paid, in declaration order
+TABLE.incoming(PAID)   # -> the rows arriving at paid
+TABLE.terminals        # -> (delivered, cancelled)
+TABLE.reachable(PAID)  # -> (paid, shipped, delivered, cancelled)
+```
 
 ## Role guards
 
@@ -774,8 +826,14 @@ TABLE = POLICY.extend(CORE)
 ```
 
 That is the whole specification: six states, seven triggers, four actors and
-every rule about who may do what, when, and what follows. Walking a parcel
-through it touches nothing else:
+every rule about who may do what, when, and what follows. It holds together as
+a graph, which the table says itself:
+
+```python
+TABLE.audit(NEW).ok   # -> True
+```
+
+Walking a parcel through it touches nothing else:
 
 ```python
 order = {
